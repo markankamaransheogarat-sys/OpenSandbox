@@ -820,6 +820,51 @@ def test_sync_connect_from_template_skips_egress_sidecar(
     assert sandbox.credential_vault is sandbox._egress_service
 
 
+def test_sync_sandbox_get_endpoint_use_server_proxy_override():
+    class _ServiceStub:
+        def __init__(self):
+            self.endpoint_calls = []
+            self.signed_endpoint_calls = []
+
+        def get_sandbox_endpoint(self, sandbox_id, port, use_server_proxy):
+            self.endpoint_calls.append((sandbox_id, port, use_server_proxy))
+            return SandboxEndpoint(endpoint=f"http://test:{port}")
+
+        def get_signed_sandbox_endpoint(self, sandbox_id, port, expires, use_server_proxy):
+            self.signed_endpoint_calls.append((sandbox_id, port, expires, use_server_proxy))
+            return SandboxEndpoint(endpoint=f"http://signed:{port}?expires={expires}")
+
+    service = _ServiceStub()
+    config = ConnectionConfigSync(use_server_proxy=False)
+    sandbox = SandboxSync(
+        sandbox_id="sbx-test",
+        sandbox_service=service,
+        filesystem_service=_Noop(),
+        command_service=_Noop(),
+        health_service=_Noop(),
+        metrics_service=_Noop(),
+        egress_service=_Noop(),
+        connection_config=config,
+    )
+
+    # Default uses connection_config.use_server_proxy (False)
+    sandbox.get_endpoint(8080)
+    assert service.endpoint_calls[-1] == ("sbx-test", 8080, False)
+
+    # Per-call override use_server_proxy=True
+    sandbox.get_endpoint(8080, use_server_proxy=True)
+    assert service.endpoint_calls[-1] == ("sbx-test", 8080, True)
+
+    # Signed endpoint default uses connection_config.use_server_proxy (False)
+    sandbox.get_signed_endpoint(8080, 1700000000)
+    assert service.signed_endpoint_calls[-1] == ("sbx-test", 8080, 1700000000, False)
+
+    # Signed endpoint with per-call override
+    sandbox.get_signed_endpoint(8080, 1700000000, use_server_proxy=True)
+    assert service.signed_endpoint_calls[-1] == ("sbx-test", 8080, 1700000000, True)
+
+
+
 def _make_sync_template_sandbox() -> SandboxSync:
 
     class _StubService:

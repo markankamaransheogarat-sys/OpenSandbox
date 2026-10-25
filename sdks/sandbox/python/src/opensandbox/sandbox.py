@@ -287,12 +287,16 @@ class Sandbox:
         """
         return await self._sandbox_service.get_sandbox_info(self.id)
 
-    async def get_endpoint(self, port: int) -> SandboxEndpoint:
+    async def get_endpoint(
+        self, port: int, *, use_server_proxy: bool | None = None
+    ) -> SandboxEndpoint:
         """
         Get a specific network endpoint for this sandbox.
 
         Args:
             port: The port number to get the endpoint for
+            use_server_proxy: Optional per-call override for whether to return a server-proxied
+                URL. If None, falls back to the connection configuration (self.connection_config.use_server_proxy).
 
         Returns:
             Endpoint information including connection details
@@ -300,17 +304,24 @@ class Sandbox:
         Raises:
             SandboxException: if endpoint cannot be retrieved
         """
-        return await self._sandbox_service.get_sandbox_endpoint(
-            self.id, port, self.connection_config.use_server_proxy
+        proxy = (
+            use_server_proxy
+            if use_server_proxy is not None
+            else self.connection_config.use_server_proxy
         )
+        return await self._sandbox_service.get_sandbox_endpoint(self.id, port, proxy)
 
-    async def get_signed_endpoint(self, port: int, expires: int) -> SandboxEndpoint:
+    async def get_signed_endpoint(
+        self, port: int, expires: int, *, use_server_proxy: bool | None = None
+    ) -> SandboxEndpoint:
         """
         Get a signed endpoint URL with an OSEP-0011 route token.
 
         Args:
             port: The port number to get the endpoint for
             expires: Unix epoch seconds for the signed route token expiry
+            use_server_proxy: Optional per-call override for whether to return a server-proxied
+                URL. If None, falls back to the connection configuration (self.connection_config.use_server_proxy).
 
         Returns:
             Endpoint information with a signed URL
@@ -318,8 +329,13 @@ class Sandbox:
         Raises:
             SandboxException: if endpoint cannot be retrieved
         """
+        proxy = (
+            use_server_proxy
+            if use_server_proxy is not None
+            else self.connection_config.use_server_proxy
+        )
         return await self._sandbox_service.get_signed_sandbox_endpoint(
-            self.id, port, expires, self.connection_config.use_server_proxy
+            self.id, port, expires, proxy
         )
 
     async def get_metrics(self) -> SandboxMetrics:

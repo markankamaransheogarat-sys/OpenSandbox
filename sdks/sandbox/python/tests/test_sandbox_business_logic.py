@@ -1236,3 +1236,49 @@ async def test_create_snapshot_restore_reports_template_origin_via_server_header
 
     assert sandbox.origin == SandboxOrigin.TEMPLATE
     assert factory.policy_service_ids == ["fsb-restored"]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_get_endpoint_use_server_proxy_override(monkeypatch: pytest.MonkeyPatch):
+    class _ServiceStub:
+        def __init__(self):
+            self.endpoint_calls = []
+            self.signed_endpoint_calls = []
+
+        async def get_sandbox_endpoint(self, sandbox_id, port, use_server_proxy):
+            self.endpoint_calls.append((sandbox_id, port, use_server_proxy))
+            return SandboxEndpoint(endpoint=f"http://test:{port}")
+
+        async def get_signed_sandbox_endpoint(self, sandbox_id, port, expires, use_server_proxy):
+            self.signed_endpoint_calls.append((sandbox_id, port, expires, use_server_proxy))
+            return SandboxEndpoint(endpoint=f"http://signed:{port}?expires={expires}")
+
+    service = _ServiceStub()
+    config = ConnectionConfig(use_server_proxy=False)
+    sandbox = Sandbox(
+        sandbox_id="sbx-test",
+        sandbox_service=service,
+        filesystem_service=_Noop(),
+        command_service=_Noop(),
+        health_service=_Noop(),
+        metrics_service=_Noop(),
+        egress_service=_Noop(),
+        connection_config=config,
+    )
+
+    # Default uses connection_config.use_server_proxy (False)
+    await sandbox.get_endpoint(8080)
+    assert service.endpoint_calls[-1] == ("sbx-test", 8080, False)
+
+    # Per-call override use_server_proxy=True
+    await sandbox.get_endpoint(8080, use_server_proxy=True)
+    assert service.endpoint_calls[-1] == ("sbx-test", 8080, True)
+
+    # Signed endpoint default uses connection_config.use_server_proxy (False)
+    await sandbox.get_signed_endpoint(8080, 1700000000)
+    assert service.signed_endpoint_calls[-1] == ("sbx-test", 8080, 1700000000, False)
+
+    # Signed endpoint with per-call override
+    await sandbox.get_signed_endpoint(8080, 1700000000, use_server_proxy=True)
+    assert service.signed_endpoint_calls[-1] == ("sbx-test", 8080, 1700000000, True)
+
