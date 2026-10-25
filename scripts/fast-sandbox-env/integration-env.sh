@@ -292,6 +292,20 @@ kubectl_get() { kubectl -n "$RESOURCE_NS" get "$1" -o jsonpath="$2"; }
 
 sudo_() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
 
+# Serialize mutating runs on the same host/workspace so overlapping CI or
+# manual invocations cannot share the kind cluster or kill each other's
+# egress containers mid-verify.
+acquire_env_lock() {
+	command -v flock >/dev/null 2>&1 || return 0
+	mkdir -p "$WORK"
+	exec 9>>"$WORK/.integration-env.lock"
+	if ! flock -n 9; then
+		log "waiting for another integration-env ($ACTION) holding $WORK/.integration-env.lock"
+		flock -w "${ENV_LOCK_TIMEOUT:-3600}" 9 \
+			|| die "timed out waiting for $WORK/.integration-env.lock"
+	fi
+}
+
 # --- helpers ---------------------------------------------------------------------
 
 kind_node() { kind get nodes --name "$KIND_CLUSTER" 2>/dev/null | head -1; }
@@ -2243,9 +2257,21 @@ server_api_status() { # method path [json-body]
 
 # The vault stage's sandbox must ride the subject-scoped egress log markers
 # (export/import/registration), so every log assertion goes through this.
+# Also check --previous container logs in case a container restarted before
+# the log poll observed an earlier marker.
 vault_log_contains() { # <fixed-substring>
-	kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=800 2>/dev/null \
-		| grep -qF "$1"
+	local pod
+	if kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=800 2>/dev/null \
+		| grep -qF "$1"; then
+		return 0
+	fi
+	for pod in $(pool_pods); do
+		if kubectl -n "$RESOURCE_NS" logs "$pod" -c egress --previous --tail=800 2>/dev/null \
+			| grep -qF "$1"; then
+			return 0
+		fi
+	done
+	return 1
 }
 
 vault_revision_is() { # <expected-revision>
@@ -2895,6 +2921,9 @@ done
 [[ -n "$ACTION" ]] || usage
 
 mkdir -p "$WORK" "$LOGS_DIR"
+if [[ "$ACTION" != "status" ]]; then
+	acquire_env_lock
+fi
 
 case "$ACTION" in
 	up)

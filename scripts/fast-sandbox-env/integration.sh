@@ -205,6 +205,10 @@ for arg in "$@"; do
 	esac
 done
 [[ -n "$ACTION" ]] || usage
+mkdir -p "$WORK" "$LOGS_DIR"
+if [[ "$ACTION" != "status" ]]; then
+	acquire_env_lock
+fi
 
 case "$ACTION" in
 	up)

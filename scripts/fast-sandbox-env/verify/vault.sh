@@ -68,9 +68,21 @@ server_api_status() { # method path [json-body]
 
 # The vault stage's sandbox must ride the subject-scoped egress log markers
 # (export/import/registration), so every log assertion goes through this.
+# Also check --previous container logs in case a container restarted before
+# the log poll observed an earlier marker.
 vault_log_contains() { # <fixed-substring>
-	kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=800 2>/dev/null \
-		| grep -qF "$1"
+	local pod
+	if kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=800 2>/dev/null \
+		| grep -qF "$1"; then
+		return 0
+	fi
+	for pod in $(pool_pods); do
+		if kubectl -n "$RESOURCE_NS" logs "$pod" -c egress --previous --tail=800 2>/dev/null \
+			| grep -qF "$1"; then
+			return 0
+		fi
+	done
+	return 1
 }
 
 vault_revision_is() { # <expected-revision>

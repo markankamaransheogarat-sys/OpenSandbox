@@ -228,6 +228,20 @@ kubectl_get() { kubectl -n "$RESOURCE_NS" get "$1" -o jsonpath="$2"; }
 
 sudo_() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
 
+# Serialize mutating runs on the same host/workspace so overlapping CI or
+# manual invocations cannot share the kind cluster or kill each other's
+# egress containers mid-verify.
+acquire_env_lock() {
+	command -v flock >/dev/null 2>&1 || return 0
+	mkdir -p "$WORK"
+	exec 9>>"$WORK/.integration-env.lock"
+	if ! flock -n 9; then
+		log "waiting for another integration-env (${ACTION:-verify}) holding $WORK/.integration-env.lock"
+		flock -w "${ENV_LOCK_TIMEOUT:-3600}" 9 \
+			|| die "timed out waiting for $WORK/.integration-env.lock"
+	fi
+}
+
 # --- helpers ---------------------------------------------------------------------
 
 kind_node() { kind get nodes --name "$KIND_CLUSTER" 2>/dev/null | head -1; }

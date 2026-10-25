@@ -230,6 +230,38 @@ render_pool
             if not line.lstrip().startswith("#") and "@OCI_FASTLET" in line
         ])
 
+    def test_vault_log_contains_falls_back_to_previous_container_logs(self):
+        result = self.run_shell(r'''
+pool_pods() { echo "fastlet-0 fastlet-1"; }
+kubectl() {
+    if [[ "$*" == *"--previous"* && "$*" == *"fastlet-1"* ]]; then
+        echo 'subject s-test: vault exported to snapshot bundle, subject sealed'
+        return 0
+    fi
+    echo 'restarted egress log tail'
+}
+vault_log_contains "subject s-test: vault exported to snapshot bundle"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_acquire_env_lock_serializes_concurrent_invocations(self):
+        result = self.run_shell(r'''
+ENV_LOCK_TIMEOUT=1
+(
+    acquire_env_lock
+    sleep 2
+) &
+holder=$!
+sleep 0.2
+if ( acquire_env_lock ); then
+    wait "$holder" || true
+    exit 99
+fi
+wait "$holder" || true
+acquire_env_lock
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
