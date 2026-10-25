@@ -39,8 +39,11 @@ import (
 //
 // The bind source is an operator-allowlisted trusted host directory
 // (validateBinds resolves symlinks and enforces allowed_writable before the
-// session starts), so this view intentionally applies no per-path symlink
-// policy of its own.
+// session starts). However, because session.run writes land live in a rw bind
+// source, sandbox code can plant a symlink inside the bind pointing outside
+// the allowed source; mutations through any symlinked component under the
+// source are rejected with rejectSymlinked, and reads reject symlinks whose
+// resolved target escapes the bind source.
 //
 // Compile-time check: BindView satisfies vfs.FS.
 var _ vfs.FS = (*BindView)(nil)
@@ -75,6 +78,59 @@ func (b *BindView) resolve(path string) (string, error) {
 	return filepath.Join(b.Source, cleaned), nil
 }
 
+// rejectSymlinked denies paths that traverse any symlinked component under
+// b.Source. session.run writes land live in a rw bind source, so sandbox code
+// can plant a symlink pointing outside the allowed source; mutating through it
+// on the host would bypass the bwrap mount namespace (#2332).
+func (b *BindView) rejectSymlinked(p string) error {
+	rel, err := filepath.Rel(b.Source, p)
+	if err != nil {
+		return err
+	}
+	if rel == "." || rel == "" {
+		return nil
+	}
+	check := filepath.Clean(b.Source)
+	for _, seg := range strings.Split(filepath.Clean(rel), string(filepath.Separator)) {
+		if seg == "" || seg == "." {
+			continue
+		}
+		check = filepath.Join(check, seg)
+		info, err := os.Lstat(check)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlink target denied: %s", check)
+		}
+	}
+	return nil
+}
+
+// rejectSymlinkEscape allows intra-bind symlinks on reads (matching namespace
+// traversal semantics) while rejecting symlinks under b.Source whose resolved
+// target escapes the bind source (#2332).
+func (b *BindView) rejectSymlinkEscape(p string) error {
+	if b.rejectSymlinked(p) == nil {
+		return nil
+	}
+	srcReal, err := filepath.EvalSymlinks(filepath.Clean(b.Source))
+	if err != nil {
+		srcReal = filepath.Clean(b.Source)
+	}
+	targetReal, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return fmt.Errorf("symlink target denied: %s", p)
+	}
+	if srcReal != "/" && targetReal != srcReal && !strings.HasPrefix(targetReal, srcReal+string(filepath.Separator)) {
+		return fmt.Errorf("symlink target denied: %s", p)
+	}
+	return nil
+}
+
 func (b *BindView) denyWrite(op string) error {
 	return &os.PathError{Op: op, Path: b.Source, Err: fmt.Errorf("bind is read-only")}
 }
@@ -84,12 +140,18 @@ func (b *BindView) Stat(path string) (os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := b.rejectSymlinkEscape(p); err != nil {
+		return nil, err
+	}
 	return os.Stat(p)
 }
 
 func (b *BindView) ReadFile(path string) ([]byte, error) {
 	p, err := b.resolve(path)
 	if err != nil {
+		return nil, err
+	}
+	if err := b.rejectSymlinkEscape(p); err != nil {
 		return nil, err
 	}
 	return os.ReadFile(p)
@@ -101,6 +163,9 @@ func (b *BindView) WriteFile(path string, data []byte, perm os.FileMode) error {
 	}
 	p, err := b.resolve(path)
 	if err != nil {
+		return err
+	}
+	if err := b.rejectSymlinked(p); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -118,6 +183,9 @@ func (b *BindView) WriteFileReader(path string, r io.Reader, perm os.FileMode) (
 	}
 	p, err := b.resolve(path)
 	if err != nil {
+		return 0, err
+	}
+	if err := b.rejectSymlinked(p); err != nil {
 		return 0, err
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -143,6 +211,9 @@ func (b *BindView) Remove(path string) error {
 	if err != nil {
 		return err
 	}
+	if err := b.rejectSymlinked(p); err != nil {
+		return err
+	}
 	return os.Remove(p)
 }
 
@@ -154,6 +225,9 @@ func (b *BindView) RemoveAll(path string) error {
 	if err != nil {
 		return err
 	}
+	if err := b.rejectSymlinked(p); err != nil {
+		return err
+	}
 	return os.RemoveAll(p)
 }
 
@@ -163,6 +237,9 @@ func (b *BindView) MkdirAll(path string, perm os.FileMode) error {
 	}
 	p, err := b.resolve(path)
 	if err != nil {
+		return err
+	}
+	if err := b.rejectSymlinked(p); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(p, perm); err != nil {
@@ -183,6 +260,12 @@ func (b *BindView) Rename(oldPath, newPath string) error {
 	if err != nil {
 		return err
 	}
+	if err := b.rejectSymlinked(oldP); err != nil {
+		return err
+	}
+	if err := b.rejectSymlinked(newP); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(newP), 0o755); err != nil {
 		return err
 	}
@@ -197,6 +280,9 @@ func (b *BindView) Chmod(path string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
+	if err := b.rejectSymlinked(p); err != nil {
+		return err
+	}
 	return os.Chmod(p, mode)
 }
 
@@ -205,12 +291,18 @@ func (b *BindView) ReadDir(path string) ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := b.rejectSymlinkEscape(p); err != nil {
+		return nil, err
+	}
 	return os.ReadDir(p)
 }
 
 func (b *BindView) Open(path string) (*os.File, error) {
 	p, err := b.resolve(path)
 	if err != nil {
+		return nil, err
+	}
+	if err := b.rejectSymlinkEscape(p); err != nil {
 		return nil, err
 	}
 	return os.Open(p)
